@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 import app
 import archive
 from jobs import JobStore
+from router import Router
 from rules import RuleStore
 from store import MessageStore
 from summaries import SummaryStore
@@ -305,6 +306,105 @@ class ImportExportApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         payload = json.loads(response.body.decode("utf-8"))
         self.assertIn("expected .zip", payload["error"])
+
+
+class FakeRegistry:
+    def get_all_names(self):
+        return ["alice", "bob"]
+
+    def resolve_to_instances(self, target):
+        return [target]
+
+    def get_instance(self, target):
+        return {"state": "active"}
+
+
+class FakeAgentTrigger:
+    def __init__(self):
+        self.calls = []
+
+    def is_available(self, target):
+        return True
+
+    async def trigger(self, target, message="", channel="general", prompt=""):
+        self.calls.append({
+            "target": target,
+            "message": message,
+            "channel": channel,
+            "prompt": prompt,
+        })
+
+
+class LoopGuardContinueTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._saved = {
+            "store": app.store,
+            "router": app.router,
+            "registry": app.registry,
+            "agents": app.agents,
+            "session_engine": app.session_engine,
+            "config": app.config,
+            "broadcast_status": app.broadcast_status,
+            "pending": dict(app._loop_guard_pending),
+        }
+
+        app.store = MessageStore(str(Path(self.tmp.name) / "messages.jsonl"))
+        app.router = Router(["alice", "bob"], default_mention="none", max_hops=1)
+        app.registry = FakeRegistry()
+        app.agents = FakeAgentTrigger()
+        app.session_engine = None
+        app.config = {"agents": {"alice": {}, "bob": {}}}
+        app._loop_guard_pending.clear()
+
+        async def noop_broadcast_status():
+            return None
+
+        app.broadcast_status = noop_broadcast_status
+
+        import mcp_bridge
+        self.mcp_bridge = mcp_bridge
+        self._saved["is_online"] = mcp_bridge.is_online
+        mcp_bridge.is_online = lambda target: True
+
+    async def asyncTearDown(self):
+        app.store = self._saved["store"]
+        app.router = self._saved["router"]
+        app.registry = self._saved["registry"]
+        app.agents = self._saved["agents"]
+        app.session_engine = self._saved["session_engine"]
+        app.config = self._saved["config"]
+        app.broadcast_status = self._saved["broadcast_status"]
+        app._loop_guard_pending.clear()
+        app._loop_guard_pending.update(self._saved["pending"])
+        self.mcp_bridge.is_online = self._saved["is_online"]
+
+    async def test_continue_replays_guarded_agent_mention_in_same_channel(self):
+        await app._route_message_to_agents({
+            "sender": "alice",
+            "text": "@bob first",
+            "channel": "planning",
+        })
+        await app._route_message_to_agents({
+            "sender": "bob",
+            "text": "@alice second",
+            "channel": "planning",
+        })
+
+        self.assertTrue(app.router.is_paused("planning"))
+        self.assertEqual(len(app.agents.calls), 1)
+        self.assertEqual(app.agents.calls[0]["target"], "bob")
+        self.assertEqual(app._loop_guard_pending["planning"]["sender"], "bob")
+
+        await app._resume_loop_guard("human", "planning")
+
+        self.assertFalse(app.router.is_paused("planning"))
+        self.assertNotIn("planning", app._loop_guard_pending)
+        self.assertEqual(len(app.agents.calls), 2)
+        self.assertEqual(app.agents.calls[1]["target"], "alice")
+        self.assertEqual(app.agents.calls[1]["message"], "bob: @alice second")
+        self.assertEqual(app.agents.calls[1]["channel"], "planning")
 
 
 if __name__ == "__main__":

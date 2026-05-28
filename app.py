@@ -43,6 +43,7 @@ session_store: SessionStore | None = None
 session_engine: SessionEngine | None = None
 config: dict = {}
 ws_clients: set[WebSocket] = set()
+_loop_guard_pending: dict[str, dict] = {}
 
 # --- Security: session token (set by configure()) ---
 session_token: str = ""
@@ -701,6 +702,100 @@ def _resolve_draft_lineage(text: str, channel: str) -> tuple[str, int]:
     return str(uuid.uuid4())[:8], 1
 
 
+def _known_agent_names() -> set[str]:
+    names = set(registry.get_all_names()) if registry else set()
+    names.update(config.get("agents", {}).keys())
+    return names
+
+
+async def _route_message_to_agents(
+    msg: dict,
+    *,
+    known_agents: set[str] | None = None,
+    is_hidden_session_request: bool = False,
+) -> bool:
+    """Route one already-broadcast/stored message to mentioned agents."""
+    text = msg.get("text", "")
+    sender = msg.get("sender", "")
+    channel = msg.get("channel", "general")
+    known_agents = known_agents if known_agents is not None else _known_agent_names()
+    paused_before = router.is_paused(channel)
+
+    raw_targets = router.get_targets(sender, text, channel)
+    # Resolve base family names to actual registered instances
+    # e.g. 'claude' -> 'claude-prime' when slot-1 was renamed
+    targets = []
+    for t in raw_targets:
+        if registry:
+            targets.extend(registry.resolve_to_instances(t))
+        else:
+            targets.append(t)
+    targets = list(dict.fromkeys(targets))  # dedupe, preserve order
+
+    if router.is_paused(channel):
+        # If this message just tripped the guard, remember it so a human
+        # /continue can replay the blocked @mention instead of requiring the
+        # user to type another prompt.
+        if (
+            not paused_before
+            and sender in known_agents
+            and router.parse_mentions(text)
+        ):
+            _loop_guard_pending[channel] = dict(msg)
+
+        # Only emit the loop guard notice once per pause
+        if not router.is_guard_emitted(channel):
+            router.set_guard_emitted(channel)
+            store.add(
+                "system",
+                f"Loop guard: {router.max_hops} agent-to-agent hops reached. "
+                "Type /continue to resume.",
+                channel=channel
+            )
+        return False
+
+    # Build a readable message string for the wake prompt
+    chat_msg = f"{sender}: {text}" if text else ""
+    custom_prompt = text if is_hidden_session_request else ""
+
+    # Session turn guard: if a session is active on this channel and the sender
+    # is an agent, only allow triggering the agent whose turn it is.
+    # Human @mentions are always allowed (the session engine handles pausing).
+    sender_is_agent = sender in known_agents
+    allowed_agent = session_engine.get_allowed_agent(channel) if session_engine and sender_is_agent else None
+
+    import mcp_bridge
+    triggered = False
+    for target in targets:
+        # Skip pending instances — they haven't been named/claimed yet
+        if registry:
+            inst = registry.get_instance(target)
+            if inst and inst.get("state") == "pending":
+                continue
+        # Session guard: suppress out-of-turn agent triggers
+        if allowed_agent and target != allowed_agent:
+            continue
+        if not mcp_bridge.is_online(target):
+            store.add("system", f"{target} appears offline — message queued.", msg_type="system", channel=channel)
+        if agents.is_available(target):
+            await agents.trigger(target, message=chat_msg, channel=channel, prompt=custom_prompt)
+            triggered = True
+    return triggered
+
+
+async def _resume_loop_guard(sender: str, channel: str):
+    """Resume a paused channel and replay the @mention that hit the guard."""
+    pending = _loop_guard_pending.pop(channel, None)
+    router.continue_routing(channel)
+    if pending:
+        store.add("system", "Resuming agent conversation...", msg_type="system", channel=channel)
+    else:
+        store.add("system", f"Routing resumed by {sender}.", msg_type="system", channel=channel)
+    await broadcast_status()
+    if pending:
+        await _route_message_to_agents(pending)
+
+
 async def _handle_new_message(msg: dict):
     """Broadcast message to web clients + check for @mention triggers."""
     # For broadcast slash commands, suppress the raw message — only the expanded
@@ -720,8 +815,7 @@ async def _handle_new_message(msg: dict):
     _broadcast_cmds = ("/hatmaking", "/artchallenge", "/roastreview", "/poetry")
     cmd_word = stripped.split()[0] if stripped else ""
     is_broadcast_cmd = cmd_word in _broadcast_cmds
-    known_agents = set(registry.get_all_names()) if registry else set()
-    known_agents.update(config.get("agents", {}).keys())
+    known_agents = _known_agent_names()
     _session_draft_re = _re.compile(r'```session\s*\n(.*?)\n```', _re.DOTALL)
     draft_match = _session_draft_re.search(text)
     is_agent_session_draft = bool(draft_match and sender in known_agents)
@@ -752,9 +846,7 @@ async def _handle_new_message(msg: dict):
         if sender in known_agents:
             store.add("system", f"Loop guard: only humans can /continue. {sender} tried to self-resume.", channel=channel)
             return
-        router.continue_routing(channel)
-        store.add("system", f"Routing resumed by {sender}.", channel=channel)
-        await broadcast_status()
+        await _resume_loop_guard(sender, channel)
         return
 
     if stripped == "/roastreview":
@@ -857,53 +949,13 @@ async def _handle_new_message(msg: dict):
                            "errors": ["Invalid JSON in session block"], "valid": False},
             )
 
-    raw_targets = router.get_targets(sender, text, channel)
-    # Resolve base family names to actual registered instances
-    # e.g. 'claude' → 'claude-prime' when slot-1 was renamed
-    targets = []
-    for t in raw_targets:
-        if registry:
-            targets.extend(registry.resolve_to_instances(t))
-        else:
-            targets.append(t)
-    targets = list(dict.fromkeys(targets))  # dedupe, preserve order
-
-    if router.is_paused(channel):
-        # Only emit the loop guard notice once per pause
-        if not router.is_guard_emitted(channel):
-            router.set_guard_emitted(channel)
-            store.add(
-                "system",
-                f"Loop guard: {router.max_hops} agent-to-agent hops reached. "
-                "Type /continue to resume.",
-                channel=channel
-            )
-        return
-
-    # Build a readable message string for the wake prompt
-    chat_msg = f"{sender}: {text}" if text else ""
-    custom_prompt = text if is_hidden_session_request else ""
-
-    # Session turn guard: if a session is active on this channel and the sender
-    # is an agent, only allow triggering the agent whose turn it is.
-    # Human @mentions are always allowed (the session engine handles pausing).
-    sender_is_agent = sender in known_agents
-    allowed_agent = session_engine.get_allowed_agent(channel) if session_engine and sender_is_agent else None
-
-    import mcp_bridge
-    for target in targets:
-        # Skip pending instances — they haven't been named/claimed yet
-        if registry:
-            inst = registry.get_instance(target)
-            if inst and inst.get("state") == "pending":
-                continue
-        # Session guard: suppress out-of-turn agent triggers
-        if allowed_agent and target != allowed_agent:
-            continue
-        if not mcp_bridge.is_online(target):
-            store.add("system", f"{target} appears offline — message queued.", msg_type="system", channel=channel)
-        if agents.is_available(target):
-            await agents.trigger(target, message=chat_msg, channel=channel, prompt=custom_prompt)
+    if sender not in known_agents:
+        _loop_guard_pending.pop(channel, None)
+    await _route_message_to_agents(
+        msg,
+        known_agents=known_agents,
+        is_hidden_session_request=is_hidden_session_request,
+    )
 
 
 # --- broadcasting ---
@@ -1169,9 +1221,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         await broadcast_clear(channel=channel)
                         continue
                     if cmd == "/continue":
-                        router.continue_routing()
-                        store.add("system", "Resuming agent conversation...", msg_type="system", channel=channel)
-                        await broadcast_status()
+                        await _resume_loop_guard(sender, channel)
                         continue
                     # Broadcast slash commands — expand without storing the raw command.
                     # _handle_new_message will store the expanded version.
