@@ -1,0 +1,28 @@
+{
+  "id": "design-critique-strict",
+  "name": "Design Critique (Strict)",
+  "description": "Like Design Critique, but the critic MUST cite [file:line] for every claim about existing code.",
+  "roles": ["presenter", "critic", "synthesiser"],
+  "user_required": false,
+  "phases": [
+    {
+      "name": "Present",
+      "participants": ["presenter"],
+      "prompt": "Explain the work, goals, constraints, and what feedback you need. Cite [file:line] when referring to existing code.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Critique",
+      "participants": ["critic"],
+      "prompt": "Identify strengths, weaknesses, risks, and concrete improvements. Provide your own independent analysis. Any claim about existing code MUST cite [file:line]. Uncited claims will be treated as hypotheses and ignored.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Synthesis",
+      "participants": ["synthesiser"],
+      "prompt": "Turn the discussion into prioritised recommendations: keep / change / investigate. Reference [file:line] for each item. If the synthesis exceeds ~30 lines, Write it to .agentchattr/artifacts/session-{session_id}/critique-synthesis.md and reference the path in chat.",
+      "turn_order": "sequential",
+      "is_output": true
+    }
+  ]
+}

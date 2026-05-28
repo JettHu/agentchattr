@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re as _re
 import sys
 import threading
@@ -229,6 +230,24 @@ def _install_security_middleware(token: str, cfg: dict):
     app.add_middleware(SecurityMiddleware)
 
 
+def _resolve_artifact_root(cfg: dict, root: Path) -> Path:
+    """Resolve `.agentchattr/artifacts/` relative to the first agent's cwd.
+
+    All wrappers in `config.toml` share the same `cwd` (default "."), so this
+    one path is what agents see when they Write to
+    `.agentchattr/artifacts/...` and what the server reads back via
+    `/api/artifact`. Falls back to repo ROOT if no agent is configured.
+    """
+    agents_cfg = cfg.get("agents", {}) or {}
+    cwd = "."
+    for entry in agents_cfg.values():
+        candidate = (entry or {}).get("cwd")
+        if candidate:
+            cwd = candidate
+            break
+    return (root / cwd / ".agentchattr" / "artifacts").resolve()
+
+
 def configure(cfg: dict, session_token: str = ""):
     global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, config
     config = cfg
@@ -295,7 +314,19 @@ def configure(cfg: dict, session_token: str = ""):
         str(Path(data_dir) / "session_runs.json"),
         templates_dir=str(ROOT / "session_templates"),
     )
-    session_engine = SessionEngine(session_store, store, agents, registry)
+
+    # Artifact root — shared across agents and the server. Resolved relative to
+    # the first agent's cwd (all agents currently share one cwd in config.toml).
+    # Templates that ask agents to Write summary.json / plans / reviews land here.
+    artifact_root = _resolve_artifact_root(cfg, ROOT)
+    try:
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        (artifact_root / "general").mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        log.warning("Could not create artifact root %s: %s", artifact_root, exc)
+
+    session_engine = SessionEngine(session_store, store, agents, registry,
+                                   artifact_root=artifact_root)
     session_store.on_change(_on_session_change)
 
     # Bridge: when ANY message is added to store (including via MCP),
@@ -571,12 +602,39 @@ def _on_session_change(action: str, session: dict):
                 meta = msg.get("metadata") or {}
                 meta["session_output"] = True
                 store.update_message(output_id, {"metadata": meta})
+        status_family = session.get("status_family", "success")
+        verdict = session.get("verdict")
+        unparseable = bool(session.get("output_unparseable"))
+        if status_family == "human_required":
+            base_text = f"Session needs human review: {session.get('template_name', '?')}"
+        else:
+            base_text = f"Session complete: {session.get('template_name', '?')}"
         store.add(
             sender="system",
-            text=f"Session complete: {session.get('template_name', '?')}",
+            text=base_text,
             msg_type="session_end",
             channel=session.get("channel", "general"),
-            metadata={"session_id": session.get("id"), "output_message_id": output_id},
+            metadata={
+                "session_id": session.get("id"),
+                "output_message_id": output_id,
+                "status_family": status_family,
+                "verdict": verdict,
+                "summary_path": session.get("summary_path"),
+                "output_unparseable": unparseable,
+            },
+        )
+    elif action == "fail" and store:
+        reason = session.get("interrupt_reason", "failed")
+        store.add(
+            sender="system",
+            text=f"Session failed: {session.get('template_name', '?')} ({reason})",
+            msg_type="session_end",
+            channel=session.get("channel", "general"),
+            metadata={
+                "session_id": session.get("id"),
+                "reason": reason,
+                "status_family": "failed",
+            },
         )
     elif action == "interrupt" and store:
         reason = session.get("interrupt_reason", "interrupted")
@@ -2375,6 +2433,22 @@ async def start_session(request: Request):
                 status_code=400,
             )
 
+    # Enforce template-declared independence constraints (e.g. plan-review
+    # demands cross-vendor planners). Non-strict templates declare nothing
+    # and are unaffected.
+    violations = session_engine.validate_independence(tmpl, cast)
+    if violations:
+        return JSONResponse(
+            {
+                "error": "independence constraints not satisfied",
+                "violations": violations,
+                "template_id": template_id,
+                "template_name": tmpl.get("name", template_id),
+                "cast": cast,
+            },
+            status_code=400,
+        )
+
     session = session_engine.start_session(template_id, channel, cast, started_by, goal)
     if not session:
         return JSONResponse({"error": "could not start session (one may already be active)"}, status_code=409)
@@ -2609,3 +2683,107 @@ async def serve_upload(filename: str):
     if filepath.exists():
         return FileResponse(filepath)
     return JSONResponse({"error": "not found"}, status_code=404)
+
+
+# Allowed extensions for artifact reads — markdown plus a small set of
+# common companions agents drop next to a plan (json summaries, txt logs).
+_ARTIFACT_ALLOWED_SUFFIXES = {".md", ".markdown", ".json", ".txt"}
+_ARTIFACT_MAX_BYTES = 1_000_000   # 1MB cap; bigger files just won't preview
+_ARTIFACT_PREVIEW_BYTES = 4_096
+
+
+def _resolve_artifact_request(path: str) -> tuple[Path | None, str | None]:
+    """Validate `path` and return (resolved_path, error_message).
+
+    The path must:
+      - be relative (no absolute paths, no drive letters, no `..` escapes)
+      - resolve inside the configured artifact root
+      - have an allowed suffix
+
+    Both `.agentchattr/artifacts/session-42/foo.md` (the form agents post
+    in chat) and the bare `session-42/foo.md` (relative to the artifact
+    root) are accepted, since the frontend captures the full prefixed
+    form straight from the message text.
+    """
+    if not path:
+        return None, "missing path"
+    p = Path(path)
+    if p.is_absolute():
+        return None, "absolute paths not allowed"
+    # Tolerate the `.agentchattr/artifacts/` prefix so we don't have to do
+    # the stripping client-side in two places.
+    parts = p.parts
+    if len(parts) >= 2 and parts[0] == ".agentchattr" and parts[1] == "artifacts":
+        p = Path(*parts[2:]) if len(parts) > 2 else Path()
+    root = _resolve_artifact_root(config or {}, Path(__file__).parent)
+    try:
+        candidate = (root / p).resolve()
+    except (OSError, RuntimeError):
+        return None, "invalid path"
+    # commonpath check stops `../etc/passwd`-style escapes regardless of how
+    # tricky the input looked.
+    try:
+        common = os.path.commonpath([str(root), str(candidate)])
+    except ValueError:
+        return None, "invalid path"
+    if Path(common) != root:
+        return None, "path outside artifact root"
+    if candidate.suffix.lower() not in _ARTIFACT_ALLOWED_SUFFIXES:
+        return None, f"suffix not allowed ({candidate.suffix})"
+    return candidate, None
+
+
+@app.get("/api/artifact")
+async def get_artifact(path: str = "", mode: str = "view"):
+    """Read an artifact file under .agentchattr/artifacts/.
+
+    Query params:
+      - path: relative path under the artifact root (e.g.
+        'session-42/final-plan.md').
+      - mode: 'view' returns the raw file; 'preview' returns JSON metadata
+        plus a short head excerpt for the chat card; 'download' streams as
+        an attachment.
+    """
+    resolved, err = _resolve_artifact_request(path)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not resolved.exists() or not resolved.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        size = resolved.stat().st_size
+    except OSError:
+        return JSONResponse({"error": "stat failed"}, status_code=500)
+    if size > _ARTIFACT_MAX_BYTES and mode != "preview":
+        return JSONResponse(
+            {"error": f"file too large ({size} bytes, max {_ARTIFACT_MAX_BYTES})"},
+            status_code=413,
+        )
+
+    if mode == "preview":
+        try:
+            with resolved.open("rb") as f:
+                head_bytes = f.read(_ARTIFACT_PREVIEW_BYTES)
+            head = head_bytes.decode("utf-8", errors="replace")
+        except OSError:
+            return JSONResponse({"error": "read failed"}, status_code=500)
+        # Count lines without slurping the whole file when huge
+        try:
+            with resolved.open("rb") as f:
+                lines = sum(1 for _ in f)
+        except OSError:
+            lines = -1
+        return JSONResponse({
+            "path": path,
+            "name": resolved.name,
+            "size": size,
+            "lines": lines,
+            "preview": head,
+            "truncated": size > _ARTIFACT_PREVIEW_BYTES,
+            "suffix": resolved.suffix.lower(),
+        })
+
+    headers = {}
+    if mode == "download":
+        headers["Content-Disposition"] = f'attachment; filename="{resolved.name}"'
+    media = "text/markdown" if resolved.suffix.lower() in (".md", ".markdown") else None
+    return FileResponse(resolved, media_type=media, headers=headers)

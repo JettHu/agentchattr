@@ -48,6 +48,28 @@ PRESENCE_TIMEOUT = 10  # ~2 missed heartbeats (5s interval) = offline
 _roles: dict[str, str] = {}  # agent_name → role string
 _ROLES_FILE: Path | None = None
 
+# Long-message soft guard thresholds (see DDR-2 in docs/ENHANCEMENT_PLAN.md).
+# We never reject — just log and append a hint to the return so the agent
+# self-corrects next time.
+LONG_MSG_THRESHOLD = 50
+LONG_MSG_HARD_LIMIT = 500
+
+
+def _long_message_hint(lines: int) -> str:
+    """Return the trailing hint for an over-threshold chat_send, or empty string."""
+    if lines > LONG_MSG_HARD_LIMIT:
+        return (
+            f"\n\n⚠️ Message was {lines} lines. Please use the artifact "
+            f"pattern (Write to .agentchattr/artifacts/...) for outputs over "
+            f"30 lines. Token cost: roughly {lines * 4} tokens per chat_read."
+        )
+    if lines > LONG_MSG_THRESHOLD:
+        return (
+            f"\n\n💡 Message was {lines} lines. Consider the artifact pattern "
+            f"(Write to .agentchattr/artifacts/...) for outputs over 30 lines."
+        )
+    return ""
+
 # Cursor persistence — set by run.py to enable saving cursors across restarts
 _CURSORS_FILE: Path | None = None
 
@@ -120,7 +142,21 @@ _MCP_INSTRUCTIONS = (
     "This prevents over-use of the jobs feature for vague requests.\n\n"
     "To post a suggestion (Accept/Dismiss card) in a job, prefix your message with [suggestion]: "
     "chat_send(job_id=N, message='[suggestion] I recommend we refactor the auth module'). "
-    "The human can Accept (triggers you with context) or Dismiss."
+    "The human can Accept (triggers you with context) or Dismiss.\n\n"
+    "LONG OUTPUT HANDLING:\n"
+    "When your response exceeds ~30 lines (plans, reviews, designs, long analyses), use the Write tool "
+    "to save it to:\n"
+    "  .agentchattr/artifacts/session-<id>/<slug>.md   (inside a session — use the session_id from your prompt)\n"
+    "  .agentchattr/artifacts/general/<slug>.md        (no active session)\n"
+    "Paths are relative to your cwd; the .agentchattr/ directory is pre-created by the server. "
+    "NEVER write artifacts outside the .agentchattr/artifacts/ subtree (no ../, no other dotfile dirs). "
+    "Then post a short chat_send referencing the file, e.g. "
+    "'Wrote the plan: .agentchattr/artifacts/session-42/final-plan.md. Key points: …'. "
+    "The web UI renders an artifact card with a preview and Open/Download buttons.\n"
+    "Naming: include role/version in the filename, e.g. plan-claude-v1.md, "
+    "review-codex-on-claude-v1.md, final-plan.md. Short replies, decisions, and status updates "
+    "stay inline in chat_send. Rough threshold: if you'd hit Enter to break the message into "
+    "multiple paragraphs, it's probably an artifact."
 )
 
 # --- Tool implementations (shared between both servers) ---
@@ -250,6 +286,15 @@ def chat_send(
     if not message.strip() and not image_path:
         return "Empty message, not sent."
 
+    # Soft guard: log + hint when an agent dumps a long message into chat
+    # instead of using the artifact pattern. Never blocks or truncates.
+    line_count = message.count("\n") + 1 if message else 0
+    long_hint = ""
+    if line_count > LONG_MSG_THRESHOLD:
+        log.warning("Long chat_send from %s: %d lines (channel=%s, job_id=%s)",
+                    sender, line_count, channel or "?", job_id or 0)
+        long_hint = _long_message_hint(line_count)
+
     # Job-scoped send: post into a job conversation instead of main timeline
     if job_id and jobs:
         # Detect suggestion type from [suggestion] prefix
@@ -306,7 +351,7 @@ def chat_send(
                                             channel=job_channel, job_id=job_id)
 
         return f"Sent to job #{job_id} (msg_id={msg['id']})" + (
-            " [suggestion]" if msg_type == "suggestion" else "")
+            " [suggestion]" if msg_type == "suggestion" else "") + long_hint
 
     attachments = []
     if image_path:
@@ -348,7 +393,7 @@ def chat_send(
     _update_cursor(sender, [msg], channel)
     with _presence_lock:
         _presence[sender] = time.time()
-    return f"Sent (id={msg['id']})"
+    return f"Sent (id={msg['id']})" + long_hint
 
 
 def chat_propose_job(

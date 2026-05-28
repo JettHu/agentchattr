@@ -1,0 +1,34 @@
+{
+  "id": "code-review-strict",
+  "name": "Code Review (Strict)",
+  "description": "Like Code Review, but reviewers MUST cite [file:line] for every claim about code.",
+  "roles": ["builder", "reviewer", "red_team", "synthesiser"],
+  "user_required": false,
+  "phases": [
+    {
+      "name": "Submit",
+      "participants": ["builder"],
+      "prompt": "Present the code or feature you want reviewed. Explain what changed and why. Cite [file:line] for the key changes.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Review",
+      "participants": ["reviewer", "red_team"],
+      "prompt": "Review the submission. Identify issues, suggest improvements. Be specific and evidence-based. Any claim about the code MUST cite [file:line] (e.g. 'auth.py:42 calls validate_token before route guard'). Uncited claims will be treated as hypotheses and ignored.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Respond",
+      "participants": ["builder"],
+      "prompt": "Address the feedback. What will you change? What do you disagree with and why? Cite [file:line] when discussing specific code.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Summary",
+      "participants": ["synthesiser"],
+      "prompt": "Summarise: what was agreed, what changes are needed, what remains unresolved. Reference [file:line] for each action item. If the summary exceeds ~30 lines, Write it to .agentchattr/artifacts/session-{session_id}/review-summary.md and reference the path in chat.",
+      "turn_order": "sequential",
+      "is_output": true
+    }
+  ]
+}

@@ -47,9 +47,43 @@ window._messageRenderers['session_start'] = function (el, msg) {
 
 window._messageRenderers['session_end'] = function (el, msg) {
     el.classList.add('system-msg', 'session-banner', 'session-banner-end');
-    const outputId = msg.metadata?.output_message_id;
-    const jumpLink = outputId ? ` <span class="session-output-link" onclick="scrollToSessionOutput(${outputId})">View output</span>` : '';
-    el.innerHTML = `<span class="session-banner-icon">&#9632;</span> <strong>${window.escapeHtml(msg.text)}</strong>${jumpLink}`;
+    const meta = msg.metadata || {};
+    const statusFamily = meta.status_family || 'success';
+    const statusClass = {
+        success: 'session-banner-success',
+        human_required: 'session-banner-human-required',
+        failed: 'session-banner-failed',
+    }[statusFamily];
+    if (statusClass) el.classList.add(statusClass);
+
+    // Build via DOM so untrusted text never reaches innerHTML.
+    while (el.firstChild) el.removeChild(el.firstChild);
+    const icon = document.createElement('span');
+    icon.className = 'session-banner-icon';
+    icon.textContent = '■';
+    const title = document.createElement('strong');
+    title.textContent = msg.text;
+    el.appendChild(icon);
+    el.appendChild(document.createTextNode(' '));
+    el.appendChild(title);
+
+    if (meta.output_unparseable) {
+        const warn = document.createElement('span');
+        warn.className = 'session-banner-warn';
+        warn.title = 'Output did not match the expected format. Review the raw chat.';
+        warn.textContent = ' ⚠️ verdict unparseable';
+        el.appendChild(warn);
+    }
+
+    const outputId = meta.output_message_id;
+    if (outputId) {
+        el.appendChild(document.createTextNode(' '));
+        const link = document.createElement('span');
+        link.className = 'session-output-link';
+        link.textContent = 'View output';
+        link.onclick = () => window.scrollToSessionOutput && window.scrollToSessionOutput(outputId);
+        el.appendChild(link);
+    }
 };
 
 window._messageRenderers['session_phase'] = function (el, msg) {
@@ -203,7 +237,7 @@ function handleSessionEvent(action, session) {
         if (channel === window.activeChannel) {
             activeSession = session;
         }
-    } else if (action === 'complete' || action === 'interrupt') {
+    } else if (action === 'complete' || action === 'interrupt' || action === 'fail') {
         delete activeSessionsByChannel[channel];
         if (channel === window.activeChannel) {
             activeSession = null;
@@ -509,12 +543,87 @@ async function launchSessionWithCast(templateId) {
             }),
         });
         if (!res.ok) {
-            const data = await res.json();
-            alert(data.error || 'Failed to start session');
+            const data = await res.json().catch(() => ({}));
+            if (Array.isArray(data.violations) && data.violations.length) {
+                _showIndependenceRejection(data);
+            } else {
+                alert(data.error || 'Failed to start session');
+            }
         }
     } catch (e) {
         alert('Error starting session: ' + e.message);
     }
+}
+
+// Build the rejection card via DOM APIs (textContent only, no innerHTML)
+// so user-supplied strings (template name, agent names) cannot inject HTML.
+function _showIndependenceRejection(data) {
+    const existing = document.getElementById('session-reject-modal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'session-reject-modal';
+    overlay.className = 'session-launcher-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+    const dialog = document.createElement('div');
+    dialog.className = 'session-launcher-dialog session-reject-dialog';
+
+    const header = document.createElement('div');
+    header.className = 'session-launcher-header';
+    const headerTitle = document.createElement('span');
+    headerTitle.textContent = 'Cannot start: independence constraints not met';
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '×';
+    closeBtn.onclick = () => overlay.remove();
+    header.appendChild(headerTitle);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'session-reject-body';
+
+    const tmplLine = document.createElement('p');
+    tmplLine.className = 'session-reject-template';
+    tmplLine.appendChild(document.createTextNode('Template: '));
+    const tmplStrong = document.createElement('strong');
+    tmplStrong.textContent = data.template_name || data.template_id || '?';
+    tmplLine.appendChild(tmplStrong);
+    body.appendChild(tmplLine);
+
+    const ul = document.createElement('ul');
+    ul.className = 'session-reject-violations';
+    for (const v of (data.violations || [])) {
+        const li = document.createElement('li');
+        li.textContent = v;
+        ul.appendChild(li);
+    }
+    body.appendChild(ul);
+
+    const hint = document.createElement('p');
+    hint.className = 'session-reject-hint';
+    hint.textContent = 'Bring another agent vendor online (e.g. start claude alongside codex), or pick a non-strict template such as Planning or Code Review.';
+    body.appendChild(hint);
+
+    const castWrap = document.createElement('div');
+    castWrap.className = 'session-reject-cast';
+    for (const [role, agent] of Object.entries(data.cast || {})) {
+        const row = document.createElement('div');
+        row.className = 'session-cast-row';
+        const roleSpan = document.createElement('span');
+        roleSpan.className = 'session-cast-role';
+        roleSpan.textContent = role;
+        const agentSpan = document.createElement('span');
+        agentSpan.textContent = agent || '(unassigned)';
+        row.appendChild(roleSpan);
+        row.appendChild(agentSpan);
+        castWrap.appendChild(row);
+    }
+    body.appendChild(castWrap);
+
+    dialog.appendChild(header);
+    dialog.appendChild(body);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
 }
 
 // ---------------------------------------------------------------------------

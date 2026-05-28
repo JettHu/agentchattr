@@ -341,6 +341,142 @@ async function openPath(path) {
     }
 }
 
+// Matches relative .agentchattr/artifacts/... paths to .md/.json/.txt files.
+const _ARTIFACT_PATH_RE = /(?:^|[\s(\[`"'])(\.agentchattr\/artifacts\/[A-Za-z0-9_\-./]+\.(?:md|markdown|json|txt))(?=$|[\s)\]`"'.,;])/g;
+
+function _extractArtifactPaths(text) {
+    if (!text || text.indexOf('.agentchattr/artifacts/') === -1) return [];
+    const matches = String(text).matchAll(_ARTIFACT_PATH_RE);
+    const seen = new Set();
+    const out = [];
+    for (const m of matches) {
+        const p = m[1];
+        if (!seen.has(p)) {
+            seen.add(p);
+            out.push(p);
+        }
+    }
+    return out;
+}
+
+async function attachArtifactCards(messageEl, text) {
+    const paths = _extractArtifactPaths(text);
+    if (!paths.length) return;
+    const bubble = messageEl.querySelector('.chat-bubble') || messageEl;
+    for (const path of paths) {
+        const card = _createArtifactCard(path);
+        bubble.appendChild(card);
+        _loadArtifactPreview(card, path);
+    }
+}
+
+function _createArtifactCard(path) {
+    const card = document.createElement('div');
+    card.className = 'artifact-card';
+    card.dataset.path = path;
+
+    const head = document.createElement('div');
+    head.className = 'artifact-card-head';
+    const title = document.createElement('span');
+    title.className = 'artifact-card-title';
+    const name = path.split('/').pop() || path;
+    title.textContent = '📄 ' + name;
+    const meta = document.createElement('span');
+    meta.className = 'artifact-card-meta';
+    meta.textContent = 'loading…';
+    head.appendChild(title);
+    head.appendChild(meta);
+
+    const pathEl = document.createElement('div');
+    pathEl.className = 'artifact-card-path';
+    pathEl.textContent = path;
+
+    const preview = document.createElement('div');
+    preview.className = 'artifact-card-preview empty';
+    preview.textContent = 'Loading preview…';
+
+    const actions = document.createElement('div');
+    actions.className = 'artifact-card-actions';
+    const openLink = document.createElement('a');
+    openLink.target = '_blank';
+    openLink.rel = 'noopener';
+    openLink.textContent = '📂 Open';
+    openLink.href = '/api/artifact?path=' + encodeURIComponent(path) + '&mode=view&token=' + encodeURIComponent(window.SESSION_TOKEN);
+    const dlLink = document.createElement('a');
+    dlLink.textContent = '📥 Download';
+    dlLink.href = '/api/artifact?path=' + encodeURIComponent(path) + '&mode=download&token=' + encodeURIComponent(window.SESSION_TOKEN);
+    actions.appendChild(openLink);
+    actions.appendChild(dlLink);
+
+    card.appendChild(head);
+    card.appendChild(pathEl);
+    card.appendChild(preview);
+    card.appendChild(actions);
+    return card;
+}
+
+function _renderArtifactPreviewMarkdown(previewEl, markdownText) {
+    // DOMPurify is the recommended sanitizer for untrusted markdown HTML.
+    // RETURN_DOM_FRAGMENT avoids ever assigning HTML to the DOM via innerHTML.
+    // ALLOWED_URI_REGEXP locks href/src to safe schemes so a malicious
+    // `[click](javascript:...)` in a markdown artifact cannot render.
+    const rawHtml = window.marked.parse(markdownText);
+    const frag = window.DOMPurify.sanitize(rawHtml, {
+        USE_PROFILES: { html: true },
+        RETURN_DOM_FRAGMENT: true,
+        ALLOWED_URI_REGEXP: /^(?:https?|mailto|tel|#)/i,
+    });
+    while (previewEl.firstChild) previewEl.removeChild(previewEl.firstChild);
+    previewEl.appendChild(frag);
+}
+
+async function _loadArtifactPreview(card, path) {
+    const meta = card.querySelector('.artifact-card-meta');
+    const preview = card.querySelector('.artifact-card-preview');
+    try {
+        const res = await fetch('/api/artifact?path=' + encodeURIComponent(path) + '&mode=preview', {
+            headers: { 'X-Session-Token': window.SESSION_TOKEN },
+        });
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            meta.textContent = 'unavailable';
+            preview.classList.add('empty', 'artifact-card-error');
+            preview.textContent = errData.error || ('HTTP ' + res.status);
+            return;
+        }
+        const data = await res.json();
+        const sizeLabel = _formatArtifactSize(data.size);
+        const lineLabel = (typeof data.lines === 'number' && data.lines >= 0) ? (data.lines + ' lines') : '';
+        meta.textContent = [lineLabel, sizeLabel].filter(Boolean).join(' · ');
+
+        const previewText = (data.preview || '').trim();
+        if (!previewText) {
+            preview.textContent = '(empty file)';
+            return;
+        }
+        preview.classList.remove('empty');
+        const suffix = (data.suffix || '').toLowerCase();
+        if ((suffix === '.md' || suffix === '.markdown') && window.marked && window.DOMPurify) {
+            _renderArtifactPreviewMarkdown(preview, previewText);
+        } else {
+            preview.textContent = previewText;
+            preview.style.whiteSpace = 'pre-wrap';
+            preview.style.fontFamily = 'var(--font-mono, monospace)';
+        }
+    } catch (err) {
+        meta.textContent = 'error';
+        preview.classList.add('empty', 'artifact-card-error');
+        preview.textContent = 'Failed to load preview: ' + err.message;
+    }
+}
+
+function _formatArtifactSize(bytes) {
+    if (typeof bytes !== 'number') return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+
 function addCodeCopyButtons(container) {
     const blocks = container.querySelectorAll('pre');
     for (const pre of blocks) {
@@ -816,6 +952,9 @@ function appendMessage(msg) {
 
         // Add copy buttons to code blocks
         addCodeCopyButtons(el);
+
+        // Scan message text for artifact path references and append cards
+        attachArtifactCards(el, msg.text);
     }
 
     // Hide messages from other channels

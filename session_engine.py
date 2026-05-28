@@ -1,10 +1,18 @@
 """Session engine — orchestrates structured multi-agent sessions."""
 
+import json
 import logging
+import re
 import threading
 import time
+from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# Patterns used by _resolve_status when no parseable summary.json is found.
+_VERDICT_BLOCKERS_RE = re.compile(r"(?im)^\s*verdict:\s*blockers\b")
+_VERDICT_PASS_RE = re.compile(r"(?im)^\s*verdict:\s*pass\b")
+_ESCALATE_TRUE_RE = re.compile(r"(?im)^\s*escalate:\s*true\b")
 
 # Dissent mandate injected for review/critique roles
 _DISSENT_LINE = "Provide your own independent analysis. Do not repeat or defer to other participants."
@@ -20,11 +28,13 @@ class SessionEngine:
     agents via the AgentTrigger system.
     """
 
-    def __init__(self, session_store, message_store, agent_trigger, registry=None):
+    def __init__(self, session_store, message_store, agent_trigger, registry=None,
+                 artifact_root: Path | None = None):
         self._store = session_store
         self._messages = message_store
         self._trigger = agent_trigger
         self._registry = registry
+        self._artifact_root = Path(artifact_root) if artifact_root else None
         self._lock = threading.Lock()
 
         # Hook into message stream
@@ -45,12 +55,68 @@ class SessionEngine:
         if not session:
             return None
 
+        # Pre-create the per-session artifact directory so agents that follow
+        # the LONG OUTPUT prompt convention can Write straight to it.
+        if self._artifact_root:
+            try:
+                (self._artifact_root / f"session-{session['id']}").mkdir(
+                    parents=True, exist_ok=True)
+            except Exception as exc:
+                log.warning("Could not create artifact dir for session %d: %s",
+                            session["id"], exc)
+
         log.info("Session %d started: %s in #%s", session["id"],
                  session["template_name"], channel)
 
         # Trigger the first participant
         self._trigger_current(session)
         return session
+
+    def validate_independence(self, template: dict, cast: dict) -> list[str]:
+        """Return human-readable violations of `independence_constraints` from
+        the template. Empty list = OK to start. No-op for templates that don't
+        declare any constraints (which is all existing built-in templates),
+        so behaviour for non-strict sessions is unchanged.
+        """
+        constraints = template.get("independence_constraints") or []
+        if not constraints:
+            return []
+        violations: list[str] = []
+        for c in constraints:
+            roles = c.get("roles") or []
+            must_differ = c.get("must_differ", "instance")
+            agents = [cast.get(r) for r in roles]
+            missing = [r for r, a in zip(roles, agents) if not a]
+            if missing:
+                # Reject pre-phase rather than letting the session start and
+                # crash later at trigger time — matches ENHANCEMENT_PLAN §5.2.
+                violations.append(
+                    f"Roles {missing} have no agent assigned; required by "
+                    f"constraint on {roles}."
+                )
+                continue
+            if must_differ == "instance":
+                if len(set(agents)) < len(agents):
+                    violations.append(
+                        f"Roles {roles} must be different agent instances, "
+                        f"but got {agents}."
+                    )
+            elif must_differ == "vendor_family":
+                families = []
+                for a in agents:
+                    fam = a
+                    if self._registry:
+                        inst = self._registry.get_instance(a)
+                        if inst:
+                            fam = inst.get("base", a)
+                    families.append(fam)
+                if len(set(families)) < len(families):
+                    violations.append(
+                        f"Roles {roles} must be different vendor families, "
+                        f"but got {families}. Start another vendor (e.g. "
+                        "claude alongside codex) before launching this session."
+                    )
+        return violations
 
     def emit_current_phase_banner(self, session: dict):
         """Post the banner for the session's current phase."""
@@ -172,11 +238,99 @@ class SessionEngine:
 
     # --- Engine core ---
 
+    def _resolve_status(self, session: dict, tmpl: dict, output_phase: dict | None,
+                        last_msg: dict | None) -> tuple[str, str | None, str | None, bool]:
+        """Fail-closed resolution of (status_family, verdict, summary_path, output_unparseable).
+
+        Order:
+          1. Read summary.json if it exists. If parseable + valid status_family,
+             use it (but force `failed` → `human_required`; agents can't escalate).
+          2. Otherwise scan last_msg text for `verdict: blockers|pass` / `escalate: true`.
+          3. Optional `must_match` regex on the output phase — if it doesn't
+             match, flag output_unparseable=True (banner shows a small warning).
+          4. Default: success.
+        """
+        summary_rel_path: str | None = None
+        if self._artifact_root:
+            candidate = self._artifact_root / f"session-{session['id']}" / "summary.json"
+            if candidate.exists():
+                try:
+                    raw = candidate.read_text("utf-8")
+                    data = json.loads(raw)
+                    # Agents could legally produce a JSON list or scalar at
+                    # the top level; treat that the same as malformed so the
+                    # verdict-regex fallback still runs (don't crash here).
+                    if not isinstance(data, dict):
+                        raise ValueError(
+                            f"summary.json top-level must be an object, got "
+                            f"{type(data).__name__}")
+                    sf = data.get("status_family")
+                    verdict = data.get("verdict")
+                    if sf in ("success", "human_required", "failed"):
+                        if sf == "failed":
+                            log.warning("Session %d summary.json declared failed; "
+                                        "downgrading to human_required (agents cannot "
+                                        "claim failed).", session["id"])
+                            sf = "human_required"
+                        summary_rel_path = str(candidate.relative_to(self._artifact_root.parent)) \
+                            if self._artifact_root.parent in candidate.parents else str(candidate)
+                        unparseable = self._check_must_match(output_phase, last_msg)
+                        return sf, verdict, summary_rel_path, unparseable
+                    else:
+                        log.info("Session %d summary.json missing/invalid "
+                                 "status_family; falling back to verdict regex.",
+                                 session["id"])
+                except (OSError, ValueError, AttributeError, json.JSONDecodeError) as exc:
+                    log.info("Session %d summary.json malformed (%s); falling back.",
+                             session["id"], exc)
+
+        # Step 2: scan last is_output message text
+        text = (last_msg or {}).get("text", "") or ""
+        sf: str = "success"
+        verdict: str | None = None
+        if _VERDICT_BLOCKERS_RE.search(text):
+            sf, verdict = "human_required", "blockers"
+        elif _VERDICT_PASS_RE.search(text):
+            sf, verdict = "success", "pass"
+        elif _ESCALATE_TRUE_RE.search(text):
+            sf, verdict = "human_required", "escalate"
+
+        unparseable = self._check_must_match(output_phase, last_msg)
+        return sf, verdict, summary_rel_path, unparseable
+
+    def _check_must_match(self, phase: dict | None, last_msg: dict | None) -> bool:
+        """Phase 3b — if phase declares `must_match`, regex-test the last
+        is_output message. Return True when the pattern is set but did not
+        match (so the UI can show a small ⚠️ on the banner). No retries."""
+        if not phase or not last_msg:
+            return False
+        pattern = phase.get("must_match")
+        if not pattern:
+            return False
+        try:
+            if re.search(pattern, last_msg.get("text", "") or ""):
+                return False
+            log.warning("Phase %r output did not match required pattern %r",
+                        phase.get("name", "?"), pattern)
+            return True
+        except re.error as exc:
+            log.warning("Invalid must_match pattern %r: %s", pattern, exc)
+            return False
+
+    def _get_message(self, message_id: int) -> dict | None:
+        getter = getattr(self._messages, "get_by_id", None)
+        if not getter or message_id is None:
+            return None
+        try:
+            return getter(message_id)
+        except Exception:
+            return None
+
     def _advance(self, session: dict, message_id: int):
         """Advance session after the expected agent has responded."""
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
-            self._store.interrupt(session["id"], "template not found")
+            self._store.fail(session["id"], "template not found")
             return
 
         phases = tmpl.get("phases", [])
@@ -184,7 +338,13 @@ class SessionEngine:
         turn_idx = session["current_turn"]
 
         if phase_idx >= len(phases):
-            self._store.complete(session["id"], message_id)
+            last = self._get_message(message_id)
+            sf, verdict, summary_path, unparseable = self._resolve_status(
+                session, tmpl, None, last)
+            self._store.complete(session["id"], message_id,
+                                 status_family=sf, verdict=verdict,
+                                 summary_path=summary_path,
+                                 output_unparseable=unparseable)
             return
 
         phase = phases[phase_idx]
@@ -214,11 +374,22 @@ class SessionEngine:
                     )
                     self._trigger_current(session)
             else:
-                # Session complete - check if this was the output phase
+                # Session complete — resolve status family from the output
+                # phase's last message and the optional summary.json.
                 is_output = phase.get("is_output", False)
-                self._store.complete(session["id"],
-                                     message_id if is_output else None)
-                log.info("Session %d complete", session["id"])
+                last = self._get_message(message_id) if is_output else None
+                sf, verdict, summary_path, unparseable = self._resolve_status(
+                    session, tmpl, phase if is_output else None, last)
+                self._store.complete(
+                    session["id"],
+                    message_id if is_output else None,
+                    status_family=sf,
+                    verdict=verdict,
+                    summary_path=summary_path,
+                    output_unparseable=unparseable,
+                )
+                log.info("Session %d complete (status=%s verdict=%s)",
+                         session["id"], sf, verdict)
 
     def _trigger_current(self, session: dict):
         """Trigger the agent whose turn it is."""
@@ -245,7 +416,7 @@ class SessionEngine:
 
         if not agent:
             log.warning("Session %d: no agent cast for role '%s'", session["id"], role)
-            self._store.interrupt(session["id"], f"no agent for role '{role}'")
+            self._store.fail(session["id"], f"no agent for role '{role}'")
             return
 
         if not self._is_agent(agent):
@@ -267,8 +438,13 @@ class SessionEngine:
         try:
             self._trigger.trigger_sync(agent, channel=channel, prompt=prompt)
         except Exception as exc:
+            # Trigger crashes are server-detected unrecoverable failures
+            # (the agent can't even be reached). Per ENHANCEMENT_PLAN §4.1
+            # step 1, these go to `failed` rather than leaving the session
+            # stuck in `waiting`.
             log.error("Session %d: failed to trigger %s: %s",
                       session["id"], agent, exc)
+            self._store.fail(session["id"], f"trigger failed: {exc}")
 
     def _assemble_prompt(self, session: dict, tmpl: dict, phase: dict,
                          role: str) -> str:
@@ -278,6 +454,10 @@ class SessionEngine:
         total_phases = len(phases)
 
         channel = session.get("channel", "general")
+        # Allow template prompts to reference the live session id (used by
+        # Readiness Check / summary.json conventions).
+        instruction = phase.get("prompt", "").replace(
+            "{session_id}", str(session.get("id", "")))
         lines = [
             f"SESSION: {tmpl.get('name', '?')}",
         ]
@@ -285,7 +465,7 @@ class SessionEngine:
             lines.append(f"GOAL: {session['goal']}")
         lines.append(f"PHASE: {phase['name']} ({phase_idx + 1}/{total_phases})")
         lines.append(f"YOUR ROLE: {role}")
-        lines.append(f"INSTRUCTION: {phase.get('prompt', '')}")
+        lines.append(f"INSTRUCTION: {instruction}")
 
         # Dissent mandate for review/critique roles
         if role.lower() in _DISSENT_ROLES:

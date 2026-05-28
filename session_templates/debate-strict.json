@@ -1,0 +1,35 @@
+{
+  "id": "debate-strict",
+  "name": "Debate (Strict)",
+  "description": "Like Debate, but the moderator must produce a parseable verdict (pass/blockers + confidence + escalate).",
+  "roles": ["proposer", "for", "against", "moderator"],
+  "user_required": false,
+  "phases": [
+    {
+      "name": "Frame",
+      "participants": ["proposer"],
+      "prompt": "State the question or decision to debate. Provide context.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Opening Arguments",
+      "participants": ["for", "against"],
+      "prompt": "Make your opening case. Be specific and evidence-based. Cite [file:line] when claiming about code.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Rebuttals",
+      "participants": ["against", "for"],
+      "prompt": "Respond directly to the opposing argument. Where are they wrong? Provide your own independent analysis.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Verdict",
+      "participants": ["moderator"],
+      "prompt": "Deliver a structured verdict. Required output format (each on its own line):\n\nverdict: <name of for-side option> OR <name of against-side option>\nconfidence: <0-10>\nescalate: true | false\nconsensus_class: true_consensus | partial_consensus | false_consensus\n\nReasoning (3-5 sentences max) citing specific statements from for/against.\n\nHard rules:\n- Forbidden verdicts: 'both have merit', 'depends on context', any hedge.\n- If you cannot decide cleanly, set escalate: true. Do not invent a middle answer.\n- Quote concrete claims from each side as evidence.",
+      "turn_order": "sequential",
+      "is_output": true,
+      "must_match": "(?im)^verdict:\\s*\\S+"
+    }
+  ]
+}

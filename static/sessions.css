@@ -696,3 +696,134 @@
     margin-right: 6px;
     opacity: 0.7;
 }
+
+/* Independence-constraint rejection card */
+.session-reject-dialog {
+    width: 480px;
+    border-color: rgba(239, 68, 68, 0.4);
+}
+.session-reject-body {
+    padding: 0 var(--space-lg) var(--space-lg);
+    color: var(--text);
+    font-size: 13px;
+}
+.session-reject-template {
+    margin: 0 0 var(--space-sm);
+    color: var(--text-dim);
+}
+.session-reject-violations {
+    margin: 0 0 var(--space-md);
+    padding-left: 1.2em;
+    color: #fecaca;
+}
+.session-reject-violations li {
+    margin: 4px 0;
+}
+.session-reject-hint {
+    margin: 0 0 var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    background: rgba(239, 68, 68, 0.08);
+    border-left: 3px solid #ef4444;
+    border-radius: var(--radius-sm);
+    color: var(--text-dim);
+}
+.session-reject-cast {
+    margin-top: var(--space-sm);
+}
+
+/* Session terminal-state banners (status_family) */
+.session-banner-success {
+    background: linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.12), transparent);
+    border: 1px solid rgba(34, 197, 94, 0.35);
+}
+.session-banner-human-required {
+    background: linear-gradient(90deg, transparent, rgba(234, 179, 8, 0.14), transparent);
+    border: 1px solid rgba(234, 179, 8, 0.45);
+}
+.session-banner-failed {
+    background: linear-gradient(90deg, transparent, rgba(239, 68, 68, 0.14), transparent);
+    border: 1px solid rgba(239, 68, 68, 0.45);
+}
+.session-banner-warn {
+    margin-left: 6px;
+    color: #fbbf24;
+    font-weight: var(--fw-semibold);
+}
+
+/* Artifact card (rendered in chat messages) */
+.artifact-card {
+    max-width: 690px;
+    width: 100%;
+    margin-top: 8px;
+    background: rgba(59, 130, 246, 0.06);
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    border-radius: var(--radius-lg);
+    padding: 10px 14px;
+    font-size: 13px;
+}
+.artifact-card-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+.artifact-card-title {
+    font-weight: var(--fw-semibold);
+    color: var(--text);
+}
+.artifact-card-meta {
+    color: var(--text-dim);
+    font-size: 11px;
+}
+.artifact-card-path {
+    color: var(--text-dim);
+    font-size: 11px;
+    font-family: var(--font-mono, monospace);
+    margin-bottom: 8px;
+    overflow-wrap: anywhere;
+}
+.artifact-card-preview {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    max-height: 180px;
+    overflow: hidden;
+    position: relative;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.45;
+}
+.artifact-card-preview.empty {
+    opacity: 0.55;
+    font-style: italic;
+}
+.artifact-card-preview::after {
+    content: "";
+    position: absolute;
+    bottom: 0; left: 0; right: 0; height: 32px;
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.4));
+    pointer-events: none;
+}
+.artifact-card-actions {
+    margin-top: 8px;
+    display: flex;
+    gap: 8px;
+}
+.artifact-card-actions a, .artifact-card-actions button {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--text);
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    text-decoration: none;
+    font-size: 12px;
+    cursor: pointer;
+}
+.artifact-card-actions a:hover, .artifact-card-actions button:hover {
+    background: rgba(255, 255, 255, 0.12);
+}
+.artifact-card-error {
+    color: #fca5a5;
+    font-style: italic;
+}

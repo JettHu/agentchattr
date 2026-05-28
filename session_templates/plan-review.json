@@ -1,0 +1,41 @@
+{
+  "id": "plan-review",
+  "name": "Plan Review",
+  "description": "Two independent planners + two cross-reviewers + synthesiser + readiness judge. For implementation plans that need cross-vendor scrutiny.",
+  "roles": ["planner_a", "planner_b", "reviewer_a", "reviewer_b", "synthesiser", "readiness_judge"],
+  "user_required": false,
+  "independence_constraints": [
+    {"roles": ["planner_a", "planner_b"], "must_differ": "vendor_family"},
+    {"roles": ["reviewer_a", "planner_a"], "must_differ": "instance"},
+    {"roles": ["reviewer_b", "planner_b"], "must_differ": "instance"},
+    {"roles": ["synthesiser", "readiness_judge"], "must_differ": "vendor_family"}
+  ],
+  "phases": [
+    {
+      "name": "Plan Draft",
+      "participants": ["planner_a", "planner_b"],
+      "prompt": "Independently draft an implementation plan for the session goal. Do NOT read the other planner's draft yet. Write your plan to .agentchattr/artifacts/session-{session_id}/plan-<your-role>-v1.md (over ~30 lines) and reference the path in chat. Cite [file:line] when claiming about code.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Cross Review",
+      "participants": ["reviewer_a", "reviewer_b"],
+      "prompt": "reviewer_a reviews planner_b's plan; reviewer_b reviews planner_a's plan. Surface blockers, hidden assumptions, scope risks. Every finding MUST cite [file:line] when claiming about code. Uncited claims will be treated as hypotheses and ignored. Write to .agentchattr/artifacts/session-{session_id}/review-<your-role>-on-<target>-v1.md when over ~30 lines.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Synthesis",
+      "participants": ["synthesiser"],
+      "prompt": "Merge the two plans + two reviews into one final plan. Resolve conflicts, drop weak ideas, keep cited evidence. Write to .agentchattr/artifacts/session-{session_id}/final-plan.md and reference the path in chat.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Readiness Check",
+      "participants": ["readiness_judge"],
+      "prompt": "You are a Readiness Judge. You are NOT a planner, reviewer, or synthesiser.\n\nYour ONE job: decide whether the final plan in this channel is ready for a different agent to implement WITHOUT further planning.\n\nCheck (in order):\n1. Any deferred / TBD / 'see later' decisions?\n2. Each acceptance criterion concrete and verifiable?\n3. Steps ordered, scoped, individually actionable?\n4. Risks identified (resolution NOT required, acknowledgement is)?\n5. Could a fresh agent with only this plan + the repo do the work?\n\nOutput format (REQUIRED):\n\nverdict: pass            (exactly one of: pass | blockers — on its own line)\n\n## Findings\n- (one bullet per blocker, quoting evidence from the plan; omit if pass)\n\n## Reasoning\n(3-5 sentences. Why pass, or why blockers. Cite specific lines if blocking.)\n\nHard rules:\n- If unsure, prefer 'pass'. Stylistic polish is NOT a blocker.\n- Do NOT rewrite the plan. Do NOT propose better wording. Do NOT add content.\n\nAFTER writing your verdict, Write a summary file to:\n  .agentchattr/artifacts/session-{session_id}/summary.json\n\nUse this exact JSON shape:\n\n{\n  \"session_id\": {session_id},\n  \"template\": \"plan-review\",\n  \"channel\": \"<channel>\",\n  \"status_family\": \"success\" | \"human_required\",\n  \"verdict\": \"pass\" | \"blockers\",\n  \"cast\": { \"<role>\": \"<agent>\" },\n  \"artifacts\": [ { \"kind\": \"plan|review|...\", \"path\": \"<relative path>\", \"produced_by\": \"<role>\" } ],\n  \"final_output_path\": \"<the main artifact path>\",\n  \"blockers\": [ \"<short blocker description>\" ],\n  \"key_decisions\": [ \"<one-line decision>\" ]\n}\n\nRules:\n- status_family must match verdict: pass → success, blockers → human_required.\n- Do NOT write status_family=\"failed\" — that is reserved for server-detected crashes.\n- Keep machine-parseable. No prose outside this JSON.\n\nThen post a short chat message:\n  'Session summary: .agentchattr/artifacts/session-{session_id}/summary.json'",
+      "turn_order": "sequential",
+      "is_output": true,
+      "must_match": "(?im)^verdict:\\s*(pass|blockers)\\b"
+    }
+  ]
+}

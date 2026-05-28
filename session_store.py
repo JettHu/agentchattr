@@ -126,7 +126,7 @@ class SessionStore:
 
     def on_change(self, callback):
         """Register a callback(action, session) on any change.
-        action: 'create', 'update', 'complete', 'interrupt'."""
+        action: 'create', 'update', 'complete', 'fail', 'interrupt'."""
         self._callbacks.append(callback)
 
     def _fire(self, action: str, session: dict):
@@ -269,13 +269,37 @@ class SessionStore:
         self._fire("update", result)
         return result
 
-    def complete(self, session_id: int, output_message_id: int | None = None) -> dict | None:
-        """Mark session as complete."""
+    def complete(self, session_id: int, output_message_id: int | None = None,
+                 status_family: str = "success", verdict: str | None = None,
+                 summary_path: str | None = None,
+                 output_unparseable: bool = False) -> dict | None:
+        """Mark session as complete.
+
+        status_family: 'success' | 'human_required' (resolved by SessionEngine).
+        verdict / summary_path / output_unparseable: optional metadata for UI.
+        """
+        if status_family not in ("success", "human_required"):
+            # `failed` is reserved for server-detected crashes; callers that
+            # pass it here are downgraded so agents can't escalate themselves
+            # into failed.
+            status_family = "human_required"
         with self._lock:
             session = self._find(session_id)
             if not session:
                 return None
+            # Refuse to resurrect terminal sessions: a delayed _advance call
+            # (scheduled via threading.Timer) could otherwise overwrite a
+            # prior fail/interrupt/complete and broadcast the wrong state.
+            if session["state"] in ("complete", "interrupted", "failed"):
+                return None
             session["state"] = "complete"
+            session["status_family"] = status_family
+            if verdict is not None:
+                session["verdict"] = verdict
+            if summary_path is not None:
+                session["summary_path"] = summary_path
+            if output_unparseable:
+                session["output_unparseable"] = True
             session["updated_at"] = time.time()
             if output_message_id is not None:
                 session["output_message_id"] = output_message_id
@@ -284,11 +308,30 @@ class SessionStore:
         self._fire("complete", result)
         return result
 
+    def fail(self, session_id: int, reason: str = "failed") -> dict | None:
+        """Mark a session as `failed` — server-detected, agent cannot trigger.
+
+        Distinct from `interrupt()` (user-initiated): failures get the red
+        banner; interrupts keep the existing neutral banner.
+        """
+        with self._lock:
+            session = self._find(session_id)
+            if not session or session["state"] in ("complete", "interrupted", "failed"):
+                return None
+            session["state"] = "failed"
+            session["status_family"] = "failed"
+            session["interrupt_reason"] = reason
+            session["updated_at"] = time.time()
+            self._save()
+            result = dict(session)
+        self._fire("fail", result)
+        return result
+
     def interrupt(self, session_id: int, reason: str = "ended by user") -> dict | None:
         """End session early."""
         with self._lock:
             session = self._find(session_id)
-            if not session or session["state"] in ("complete", "interrupted"):
+            if not session or session["state"] in ("complete", "interrupted", "failed"):
                 return None
             session["state"] = "interrupted"
             session["interrupt_reason"] = reason
@@ -307,7 +350,15 @@ class SessionStore:
 
 
 def validate_session_template(tmpl: dict) -> list[str]:
-    """Validate a session template dict. Returns list of errors (empty = valid)."""
+    """Validate a session template dict. Returns list of errors (empty = valid).
+
+    Note: only invoked when SAVING a custom template via the HTTP endpoint.
+    Built-in templates under session_templates/*.json bypass this on disk load
+    (see SessionStore._load_templates). This is intentional — strict built-in
+    prompts (e.g. plan-review Readiness Check) intentionally exceed the
+    200-char cap that custom templates are held to. Do not "fix" by tightening
+    the built-ins; loosen this validator instead if the cap becomes a problem.
+    """
     errors = []
 
     if not isinstance(tmpl, dict):
