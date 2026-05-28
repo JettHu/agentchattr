@@ -96,4 +96,4 @@ if %errorlevel% neq 0 (
     goto :wait_server
 )
 
-python wrapper.py codex !WRAPPER_FLAGS! -- --dangerously-bypass-approvals-and-sandbox
+python wrapper.py codex !WRAPPER_FLAGS! --dangerously-bypass-approvals-and-sandbox

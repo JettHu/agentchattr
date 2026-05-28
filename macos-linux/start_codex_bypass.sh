@@ -135,7 +135,7 @@ if [ -n "$ARG_PROJECT" ]; then
         --port "$AGENTCHATTR_PORT" \
         --mcp-http-port "$AGENTCHATTR_MCP_HTTP_PORT" \
         --mcp-sse-port "$AGENTCHATTR_MCP_SSE_PORT" \
-        -- --dangerously-bypass-approvals-and-sandbox
+        --dangerously-bypass-approvals-and-sandbox
 else
-    .venv/bin/python wrapper.py codex -- --dangerously-bypass-approvals-and-sandbox
+    .venv/bin/python wrapper.py codex --dangerously-bypass-approvals-and-sandbox
 fi

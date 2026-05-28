@@ -93,18 +93,18 @@ On first launch, the script auto-creates a virtual environment, installs Python 
 
 ## Running multiple projects
 
-agentchattr can run several isolated projects on the same machine — each with its own chat, its own agents, and its own `.agentchattr/` data folder.
+Launcher `--project` is a convenience layer on top of [Per-project isolation](#per-project-isolation). It chooses matching data, upload, artifact, web, and MCP settings for a project, then passes those values to `run.py` and the wrapper.
 
 **Default (single instance, unchanged):**
 
 ```sh
-sh macos-linux/start_claude.sh        # → http://127.0.0.1:8300
+sh macos-linux/start_claude.sh        # http://127.0.0.1:8300
 :: windows\start_claude.bat
 ```
 
 No `--project` flag means port 8300 and the repo's `./data/` directory, exactly as before.
 
-**Start agents inside a specific project:**
+**Start an isolated project:**
 
 ```sh
 cd ~/work
@@ -112,26 +112,26 @@ sh ~/workspace/agentchattr/macos-linux/start_claude.sh --project ./api-server
 :: windows\start_claude.bat --project .\api-server
 ```
 
-The launcher allocates a free web port (8301, 8302, …) plus an MCP port pair, creates `~/work/api-server/.agentchattr/{data,uploads,artifacts}/`, starts a server with `cwd=api-server`, and launches Claude inside that project. The terminal prints the per-project URL.
+The launcher allocates a free web port plus an MCP port pair, creates `./api-server/.agentchattr/{data,uploads,artifacts}/`, starts the server with agent `cwd=api-server`, and prints the project URL.
 
-**Add more agents to the same project** — open another terminal and reuse the same `--project` path:
+**Add another agent to the same project:**
 
 ```sh
 sh ~/workspace/agentchattr/macos-linux/start_codex.sh --project ./api-server
 ```
 
-The second launcher sees the server is already running, skips it, and only starts the agent wrapper. Both agents end up in the same chat — `@claude` and `@codex` can mention each other.
+Reusing the same `--project` path attaches to the existing server and starts only the new wrapper.
 
-**Run two projects in parallel:**
+**Run two projects:**
 
 ```sh
 # Terminal 1
-sh ~/workspace/agentchattr/macos-linux/start_claude.sh --project ./api-server   # → 8301
+sh ~/workspace/agentchattr/macos-linux/start_claude.sh --project ./api-server
 # Terminal 2
-sh ~/workspace/agentchattr/macos-linux/start_codex.sh  --project ./frontend     # → 8302
+sh ~/workspace/agentchattr/macos-linux/start_codex.sh  --project ./frontend
 ```
 
-Two independent chats — messages, queues, and artifacts are scoped to each project.
+Messages, queues, uploads, and artifacts are scoped to each project.
 
 **Manage instances:**
 
@@ -141,7 +141,7 @@ python scripts/resolve_project_instance.py forget --project ./api-server # forge
 python scripts/resolve_project_instance.py forget --all-stale            # clean up exited entries
 ```
 
-To stop a project's server, close its launcher terminal or `kill` the process listening on its web port. V1 does not provide a `stop` subcommand.
+Use launcher `--project` when you want automatic project directories, ports, and agent `cwd`. Use the lower-level flags in [Per-project isolation](#per-project-isolation) when you run `run.py`, `wrapper.py`, or `wrapper_api.py` yourself and want to choose the exact paths and ports.
 
 **Notes:**
 
@@ -149,6 +149,7 @@ To stop a project's server, close its launcher terminal or `kill` the process li
 - Multiple projects must be launched from the **same** agentchattr checkout to share port allocation; separate clones each keep their own registry.
 - `copilot` and `codebuddy` use a single home-scoped settings file (`~/.copilot/...` / `~/.codebuddy/...`), so they cannot run in two projects from the same checkout simultaneously. All other agents can.
 - The agent roster in `config.toml` is shared across projects — V1 does not support per-project agent definitions.
+- To stop a project's server, close its launcher terminal or `kill` the process listening on its web port. V1 does not provide a `stop` subcommand.
 
 ---
 
