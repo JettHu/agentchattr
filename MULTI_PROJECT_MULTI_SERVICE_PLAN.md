@@ -661,6 +661,66 @@ sh ~/workspace/agentchattr/macos-linux/start_codex.sh  --project ./frontend
 - chat 中 artifact card 能 preview。
 - `/api/artifact?path=.agentchattr/artifacts/general/test-plan.md` 读取的是 `api-server` 项目下的文件。
 
+### 测试执行记录（2026-05-27）
+
+V1 全套（Phase 1-3 + §8 端到端）已在本地一台 macOS 上跑过。下面是已验证项与方法。
+
+**Phase 1（端口编排 + cwd / data_dir 隔离）**
+
+- ✅ 6 并发 launcher 各拿到独立 web 端口（plan §5 Phase 1 验收 #7：并发不抢端口）
+- ✅ `_port_is_free` 用 bind-then-close 探测；锁释放与 server 实际 bind 之间的 TOCTOU 已在脚本顶部 docstring 标注
+- ✅ tmux session name 含 port（`agentchattr-<port>-<agent>`），双 project 同名 agent 不互踩（plan §7.4 fix）
+- ✅ `wrapper.py:878-879` 用 `AGENTCHATTR_PORT` 命名 session
+- ✅ Phase 1 reviewer 三视角（correctness / cross-platform / concurrency）闭环：2 must-fix + 4 建议 fix 全修
+
+**Phase 2（UI project 信息）**
+
+- ✅ `/api/instance` 返回 `project_id` / `project_name` / `project_path` / `web_port` / `mcp_*_port` / `data_dir` / `upload_dir` / `artifact_root`
+- ✅ 默认实例 `project_id` 来自 cwd basename（即 `agentchattr`）
+- ✅ Phase 2 reviewer 闭环
+
+**Phase 3（管理命令）**
+
+- ✅ `python scripts/resolve_project_instance.py list` 表格 + `--json` 双格式
+- ✅ 三态分类：`running` / `stale` / `port-conflict`（port-conflict 触发条件 = 端口在监听但 `/api/instance` 返回的 `project_path` 不匹配 registry 记录）
+- ✅ `forget --project <path>` 单清；`forget --all-stale` 批清；running 默认 refuse，`--force` 可覆盖
+- ✅ `forget` 不删 `.agentchattr/{data,uploads,artifacts}`
+- ✅ `stop` 子命令 + `--help` 都明确 V1 不可用，提示用 `kill <pid>` 或关闭 launcher 终端
+- ✅ Registry 路径 = `<repo>/data/project_instances.json`，per-checkout
+
+**§8 端到端验证矩阵**
+
+| 项目 | 方法 | 结果 |
+|---|---|---|
+| 默认回归 | `run.py` 不带 `--project` 直接起 | server bind 8300 / 老 `./data/` ✓ |
+| 单 project | resolve `~/workspace/test-mp-A` → 用其端口起 server | 端口 8301 / data 在 `~/workspace/test-mp-A/.agentchattr/` ✓ |
+| 双 project 并行 | resolve A 拿 8301 / 8202-03，再 resolve B 拿 8302 / 8204-05；起两个 server | 两个 `/api/instance` 各自返回正确 `project_path`；`list` 显示两者 `running` ✓ |
+| artifact 读回 + 跨实例隔离 | 在 `~/workspace/test-mp-A` 和 `~/workspace/test-mp-B` 下预埋 `.agentchattr/artifacts/general/test-plan.md`；用各自 token 调 `/api/artifact?path=...` | A 读到 A 的文件、B 读到 B 的文件、A 用 B 的 token 被 403 拒（cross-instance token isolation）✓ |
+| tmux 双 session 共存 | nohup 起两个 wrapper（codex 接 A，claude 接 B），`tmux ls` | `agentchattr-8301-codex` + `agentchattr-8302-claude` 同时在跑、agent CLI 在各自 session 内启动且 cwd 正确 ✓ |
+| agent 实写 artifact 触发 chat preview | 用 ws 给 B 注 user 消息 `@claude 请创建 .agentchattr/artifacts/general/hello-B.md ...` | claude 通过 MCP 读 channel → 在 B 的 `.agentchattr/artifacts/general/hello-B.md` 写入 → chat 里存回复 → `/api/artifact?path=...` 读回内容一致 ✓ |
+
+**未由本地测试覆盖的 caveat**
+
+- codex 端到端在本机被 codex 自身的 `PermissionRequest` hooks 阻塞在 `chat_claim` MCP 调用前（用户本地 codex 配置问题，与 V1 plumbing 无关）。multi-project V1 的链路（消息送达 → wrapper queue watcher → tmux send-keys 注入 → 注入文本"use mcp to read #channel..." 已抵达 codex prompt）已在 codex tmux session 里观察到。
+- `start.sh` 在 macOS 走 `osascript` 弹 `Terminal.app` 启 server 的分支没在自动化测试里验证（osascript 弹的真实窗口需要 GUI 环境）；测试改走 `nohup .venv/bin/python run.py ...` 直接起 server，等价于 launcher 在 server-already-running 分支只跑 wrapper.py 的情形。
+- `home-scoped settings_file` 类 agent（`copilot` / `codebuddy`）的同 checkout 跨 project 并行不支持（plan §7.5 已声明），未做反向验证。
+
+**测试用环境清理**
+
+```sh
+# 杀掉所有测试相关进程
+while read pid; do kill $pid 2>/dev/null; done < /tmp/mptest-pids.txt
+pkill -f "run.py.*test-mp-"
+pkill -f "wrapper.py.*test-mp-"
+tmux kill-session -t agentchattr-8301-codex
+tmux kill-session -t agentchattr-8302-claude
+
+# 清掉测试 project（registry 用 forget 清）
+.venv/bin/python scripts/resolve_project_instance.py forget --project ~/workspace/test-mp-A --force
+.venv/bin/python scripts/resolve_project_instance.py forget --project ~/workspace/test-mp-B --force
+rm -rf ~/workspace/test-mp-A ~/workspace/test-mp-B
+```
+
 ---
 
 ## 9. 后续 V2 决策点
