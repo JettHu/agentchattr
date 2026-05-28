@@ -231,28 +231,41 @@ def resolve(args: argparse.Namespace) -> None:
             if args.mcp_sse_port is not None:
                 mcp_sse_port = args.mcp_sse_port
 
-            # Verify reused ports are actually free
-            for name, port in [
-                ("web", web_port),
-                ("mcp-http", mcp_http_port),
-                ("mcp-sse", mcp_sse_port),
-            ]:
-                if not _port_is_free(port):
-                    if (name == "web" and args.port is not None) or \
-                       (name == "mcp-http" and args.mcp_http_port is not None) or \
-                       (name == "mcp-sse" and args.mcp_sse_port is not None):
-                        print(
-                            f"Error: explicit {name} port {port} is in use",
-                            file=sys.stderr,
-                        )
-                        sys.exit(1)
-                    # Occupied by unrelated process — reassign
-                    if name == "web":
-                        web_port = _find_free_web_port(registry)
-                    elif name == "mcp-http":
-                        mcp_http_port, mcp_sse_port = _find_free_mcp_ports(registry)
-                    elif name == "mcp-sse":
-                        mcp_http_port, mcp_sse_port = _find_free_mcp_ports(registry)
+            # If our own server for this project is already running on the
+            # recorded web_port, reuse all ports unconditionally so a second
+            # launcher (e.g. running start_codex.sh after start_claude.sh
+            # with the same --project) attaches instead of reassigning a
+            # fresh port and starting a duplicate server.
+            same_project_running = (
+                args.port is None
+                and args.mcp_http_port is None
+                and args.mcp_sse_port is None
+                and _classify_record(abs_path, {"web_port": web_port}) == "running"
+            )
+
+            if not same_project_running:
+                # Verify reused ports are actually free
+                for name, port in [
+                    ("web", web_port),
+                    ("mcp-http", mcp_http_port),
+                    ("mcp-sse", mcp_sse_port),
+                ]:
+                    if not _port_is_free(port):
+                        if (name == "web" and args.port is not None) or \
+                           (name == "mcp-http" and args.mcp_http_port is not None) or \
+                           (name == "mcp-sse" and args.mcp_sse_port is not None):
+                            print(
+                                f"Error: explicit {name} port {port} is in use",
+                                file=sys.stderr,
+                            )
+                            sys.exit(1)
+                        # Occupied by unrelated process — reassign
+                        if name == "web":
+                            web_port = _find_free_web_port(registry)
+                        elif name == "mcp-http":
+                            mcp_http_port, mcp_sse_port = _find_free_mcp_ports(registry)
+                        elif name == "mcp-sse":
+                            mcp_http_port, mcp_sse_port = _find_free_mcp_ports(registry)
         else:
             project_id = _resolve_project_id(basename, abs_path, registry)
 
