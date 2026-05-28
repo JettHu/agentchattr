@@ -7,11 +7,15 @@ Per-invocation overrides: the following environment variables, if set,
 override values from config.toml. This lets dotfiles/launcher layers run
 isolated instances per project without editing the repo's config file.
 
-  AGENTCHATTR_DATA_DIR        → server.data_dir
-  AGENTCHATTR_PORT            → server.port           (int)
-  AGENTCHATTR_MCP_HTTP_PORT   → mcp.http_port         (int)
-  AGENTCHATTR_MCP_SSE_PORT    → mcp.sse_port          (int)
-  AGENTCHATTR_UPLOAD_DIR      → images.upload_dir
+  AGENTCHATTR_DATA_DIR        → server.data_dir        (path)
+  AGENTCHATTR_PORT            → server.port            (int)
+  AGENTCHATTR_MCP_HTTP_PORT   → mcp.http_port          (int)
+  AGENTCHATTR_MCP_SSE_PORT    → mcp.sse_port           (int)
+  AGENTCHATTR_UPLOAD_DIR      → images.upload_dir      (path)
+  AGENTCHATTR_PROJECT         → project.path           (path)
+  AGENTCHATTR_PROJECT_NAME    → project.name           (str)
+  AGENTCHATTR_PROJECT_ID      → project.id             (str)
+  AGENTCHATTR_ARTIFACT_ROOT   → server.artifact_root   (path)
 
 Relative paths in env var overrides resolve against the current working
 directory (where the user invoked the command from), not agentchattr's
@@ -26,13 +30,18 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 
 
-# Mapping: env var name → (config section, key, is_int)
+# Mapping: env var name → (config section, key, kind)
+# kind: "int" | "path" | "str"
 _ENV_OVERRIDES = [
-    ("AGENTCHATTR_DATA_DIR",      "server", "data_dir",   False),
-    ("AGENTCHATTR_PORT",          "server", "port",       True),
-    ("AGENTCHATTR_MCP_HTTP_PORT", "mcp",    "http_port",  True),
-    ("AGENTCHATTR_MCP_SSE_PORT",  "mcp",    "sse_port",   True),
-    ("AGENTCHATTR_UPLOAD_DIR",    "images", "upload_dir", False),
+    ("AGENTCHATTR_DATA_DIR",      "server",  "data_dir",       "path"),
+    ("AGENTCHATTR_PORT",          "server",  "port",           "int"),
+    ("AGENTCHATTR_MCP_HTTP_PORT", "mcp",     "http_port",      "int"),
+    ("AGENTCHATTR_MCP_SSE_PORT",  "mcp",     "sse_port",       "int"),
+    ("AGENTCHATTR_UPLOAD_DIR",    "images",  "upload_dir",     "path"),
+    ("AGENTCHATTR_PROJECT",       "project", "path",           "path"),
+    ("AGENTCHATTR_PROJECT_NAME",  "project", "name",           "str"),
+    ("AGENTCHATTR_PROJECT_ID",    "project", "id",             "str"),
+    ("AGENTCHATTR_ARTIFACT_ROOT", "server",  "artifact_root",  "path"),
 ]
 
 # Mapping: CLI flag → env var (for apply_cli_overrides)
@@ -42,6 +51,10 @@ CLI_OVERRIDE_FLAGS = [
     ("--mcp-http-port", "AGENTCHATTR_MCP_HTTP_PORT"),
     ("--mcp-sse-port",  "AGENTCHATTR_MCP_SSE_PORT"),
     ("--upload-dir",    "AGENTCHATTR_UPLOAD_DIR"),
+    ("--project",       "AGENTCHATTR_PROJECT"),
+    ("--project-name",  "AGENTCHATTR_PROJECT_NAME"),
+    ("--project-id",    "AGENTCHATTR_PROJECT_ID"),
+    ("--artifact-root", "AGENTCHATTR_ARTIFACT_ROOT"),
 ]
 
 
@@ -80,24 +93,34 @@ def apply_cli_overrides(argv: list[str] | None = None) -> None:
 
 def _apply_env_overrides(config: dict) -> None:
     """Apply AGENTCHATTR_* env vars to the config dict in-place."""
-    for env_var, section, key, is_int in _ENV_OVERRIDES:
+    for env_var, section, key, kind in _ENV_OVERRIDES:
         raw = os.environ.get(env_var)
         if raw is None or raw == "":
             continue
-        if is_int:
+        if kind == "int":
             try:
                 value = int(raw)
             except ValueError:
                 print(f"  Warning: {env_var}={raw!r} is not a valid integer, ignoring")
                 continue
-        else:
-            # Path values: resolve relative paths against current working dir,
-            # not against agentchattr's install directory.
+        elif kind == "path":
             p = Path(raw)
             if not p.is_absolute():
                 p = (Path.cwd() / p).resolve()
             value = str(p)
+        else:
+            value = raw
         config.setdefault(section, {})[key] = value
+
+
+def _apply_project_cwd_override(config: dict) -> None:
+    """When AGENTCHATTR_PROJECT is set, override agent cwd entries."""
+    project = os.environ.get("AGENTCHATTR_PROJECT")
+    if not project:
+        return
+    for agent_cfg in config.get("agents", {}).values():
+        if "cwd" in agent_cfg:
+            agent_cfg["cwd"] = project
 
 
 def load_config(root: Path | None = None) -> dict:
@@ -133,5 +156,6 @@ def load_config(root: Path | None = None) -> dict:
                 print(f"  Warning: Ignoring local agent '{name}' (already defined in config.toml)")
 
     _apply_env_overrides(config)
+    _apply_project_cwd_override(config)
 
     return config

@@ -583,11 +583,17 @@ def main():
     parser.add_argument("--mcp-http-port", default=None, help="Override mcp.http_port (int)")
     parser.add_argument("--mcp-sse-port",  default=None, help="Override mcp.sse_port (int)")
     parser.add_argument("--upload-dir",    default=None, help="Override images.upload_dir (path)")
+    parser.add_argument("--project",       default=None, help="Override agent cwd; consumed by wrapper, not agent CLI")
+    parser.add_argument("--project-name",  default=None, help="Display name; consumed by wrapper")
+    parser.add_argument("--project-id",    default=None, help="Project ID; consumed by wrapper")
+    parser.add_argument("--artifact-root", default=None, help="Override artifact root; consumed by wrapper")
     args, extra = parser.parse_known_args()
 
     agent = args.agent
     agent_cfg = config.get("agents", {}).get(agent, {})
     cwd = agent_cfg.get("cwd", ".")
+    if cwd == "." and os.environ.get("AGENTCHATTR_PROJECT"):
+        cwd = os.environ["AGENTCHATTR_PROJECT"]
     command = agent_cfg.get("command", agent)
     data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -711,7 +717,8 @@ def main():
         sys.exit(1)
     command = resolved
 
-    project_dir = (ROOT / cwd).resolve()
+    cwd_path = Path(cwd)
+    project_dir = cwd_path.resolve() if cwd_path.is_absolute() else (ROOT / cwd).resolve()
 
     # Gemini: ensure the project directory is trusted so MCPs are allowed.
     # Gemini blocks ALL MCPs for untrusted folders — even system-settings ones.
@@ -868,7 +875,8 @@ def main():
     else:
         from wrapper_unix import get_activity_checker, run_agent
 
-        unix_session_name = f"agentchattr-{assigned_name}"
+        _port_suffix = os.environ.get("AGENTCHATTR_PORT") or str(config.get("server", {}).get("port", 8300))
+        unix_session_name = f"agentchattr-{_port_suffix}-{assigned_name}"
         _set_activity_checker(get_activity_checker(unix_session_name, trigger_flag=_trigger_flag))
 
     run_kwargs = dict(

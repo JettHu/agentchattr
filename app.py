@@ -185,7 +185,11 @@ def _install_security_middleware(token: str, cfg: dict):
             # Static assets, index page, and uploaded images are public.
             # The index page injects the token client-side via same-origin script.
             # Uploads use random filenames and have path-traversal protection.
-            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles")):
+            # /api/instance is read-only runtime info (project_path/ports/dirs)
+            # consumed by the project-instance management CLI from other local
+            # checkouts that don't share this server's session_token. Origin
+            # check above still blocks browser cross-origin abuse.
+            if path == "/" or path == "/api/instance" or path.startswith(("/static/", "/uploads/", "/api/roles")):
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
@@ -238,6 +242,9 @@ def _resolve_artifact_root(cfg: dict, root: Path) -> Path:
     `.agentchattr/artifacts/...` and what the server reads back via
     `/api/artifact`. Falls back to repo ROOT if no agent is configured.
     """
+    explicit = (cfg.get("server") or {}).get("artifact_root")
+    if explicit:
+        return Path(explicit).resolve()
     agents_cfg = cfg.get("agents", {}) or {}
     cwd = "."
     for entry in agents_cfg.values():
@@ -2307,6 +2314,48 @@ async def heartbeat(agent_name: str, request: Request):
 
 
 # --- Open agent session in terminal ---
+
+@app.get("/api/instance")
+async def get_instance():
+    """Return runtime config of this server instance (never reads registry)."""
+    cfg = config or {}
+    project_cfg = cfg.get("project") or {}
+    server_cfg = cfg.get("server") or {}
+    mcp_cfg = cfg.get("mcp") or {}
+    images_cfg = cfg.get("images") or {}
+
+    data_dir = server_cfg.get("data_dir", "./data")
+    upload_dir = images_cfg.get("upload_dir", "./uploads")
+    artifact_root_value = server_cfg.get("artifact_root")
+    if not artifact_root_value:
+        artifact_root_value = str(_resolve_artifact_root(cfg, Path(__file__).parent))
+
+    project_path = project_cfg.get("path")
+    if not project_path:
+        agents_cfg = cfg.get("agents") or {}
+        for entry in agents_cfg.values():
+            cand = (entry or {}).get("cwd")
+            if cand:
+                project_path = str((Path(__file__).parent / cand).resolve())
+                break
+
+    project_id = project_cfg.get("id") or (
+        os.path.basename(project_path) if project_path else "default"
+    )
+    project_name = project_cfg.get("name") or project_id
+
+    return JSONResponse({
+        "project_id": project_id,
+        "project_name": project_name,
+        "project_path": project_path,
+        "web_port": server_cfg.get("port"),
+        "mcp_http_port": mcp_cfg.get("http_port"),
+        "mcp_sse_port": mcp_cfg.get("sse_port"),
+        "data_dir": data_dir,
+        "upload_dir": upload_dir,
+        "artifact_root": artifact_root_value,
+    })
+
 
 @app.get("/api/platform")
 async def get_platform():

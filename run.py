@@ -27,6 +27,10 @@ def _parse_args():
     parser.add_argument("--mcp-http-port", default=None, help="Override mcp.http_port (int)")
     parser.add_argument("--mcp-sse-port",  default=None, help="Override mcp.sse_port (int)")
     parser.add_argument("--upload-dir",    default=None, help="Override images.upload_dir (path)")
+    parser.add_argument("--project",       default=None, help="Override agent cwd to this absolute path; sets AGENTCHATTR_PROJECT")
+    parser.add_argument("--project-name",  default=None, help="Display name (does not change paths); sets AGENTCHATTR_PROJECT_NAME")
+    parser.add_argument("--project-id",    default=None, help="Stable ID (does not change paths); sets AGENTCHATTR_PROJECT_ID")
+    parser.add_argument("--artifact-root", default=None, help="Override server.artifact_root; sets AGENTCHATTR_ARTIFACT_ROOT")
     parser.add_argument("--allow-network", action="store_true",
                         help="Allow binding to non-localhost hosts (with confirmation).")
     return parser.parse_args()

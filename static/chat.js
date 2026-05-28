@@ -26,6 +26,8 @@ let agentHats = {};  // { agent_name: svg_string }
 window.customRoles = [];  // saved custom roles from settings
 let colorOverrides = JSON.parse(localStorage.getItem('agentchattr-color-overrides') || '{}');
 let schedulesList = [];  // array of schedule objects from server
+let instanceInfo = {};   // populated by /api/instance on init; empty object until fetched
+let baseTitle = 'agentchattr';  // server settings title; document.title is computed from baseTitle + instanceInfo
 
 // Expose globals that extracted modules (sessions.js, jobs.js) read via window.*
 // Using defineProperty so live values are always returned.
@@ -42,6 +44,7 @@ Object.defineProperty(window, 'ws', { get() { return ws; } });
 Object.defineProperty(window, 'soundEnabled', { get() { return soundEnabled; } });
 Object.defineProperty(window, 'rules', { get() { return rules; }, set(v) { rules = v; } });
 Object.defineProperty(window, 'autoScroll', { get() { return autoScroll; } });
+Object.defineProperty(window, 'instanceInfo', { get() { return instanceInfo; } });
 Object.defineProperty(window, '_lastMentionedAgent', {
     get() { return _lastMentionedAgent; },
     set(v) { _lastMentionedAgent = v; },
@@ -226,7 +229,7 @@ function dismissUpdate(e, version) {
 
 // --- Init ---
 
-function init() {
+async function init() {
     // Configure marked for chat-style rendering
     marked.setOptions({
         breaks: true,      // single newline → <br>
@@ -234,6 +237,10 @@ function init() {
     });
 
     detectPlatform();
+    // Await instance info before WebSocket connects so applySettings on the
+    // initial settings event can build the title with the [id] prefix already
+    // populated, avoiding a visible jump on slow servers.
+    await fetchInstanceInfo();
     fetchRoles();
     connectWebSocket();
     setupInput();
@@ -311,6 +318,29 @@ async function detectPlatform() {
         const data = await r.json();
         serverPlatform = data.platform || 'win32';
     } catch (e) { /* fallback to win32 */ }
+}
+
+async function fetchInstanceInfo() {
+    try {
+        const r = await fetch('/api/instance', { headers: { 'X-Session-Token': SESSION_TOKEN } });
+        if (!r.ok) return;
+        instanceInfo = await r.json();
+        applyInstanceInfo();
+    } catch (e) { /* fail silent: don't block UI on instance failure */ }
+}
+
+function applyInstanceInfo() {
+    const sub = document.getElementById('room-subtitle');
+    if (sub && instanceInfo.project_id) {
+        const port = instanceInfo.web_port != null ? `:${instanceInfo.web_port}` : '';
+        sub.textContent = `${instanceInfo.project_id} ${port}`.trim();
+        if (instanceInfo.project_path) sub.title = instanceInfo.project_path;
+    }
+    if (instanceInfo.project_id && instanceInfo.project_id !== 'default') {
+        document.title = `[${instanceInfo.project_id}] ${baseTitle}`;
+    } else {
+        document.title = baseTitle;
+    }
 }
 
 function linkifyPaths(html) {
@@ -1871,7 +1901,8 @@ let pendingChannelSwitch = null;
 function applySettings(data) {
     if (data.title) {
         document.getElementById('room-title').textContent = data.title;
-        document.title = data.title;
+        baseTitle = data.title;
+        applyInstanceInfo();
     }
     if (data.username) {
         username = data.username;
